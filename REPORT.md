@@ -1,216 +1,131 @@
-## The Clasico Experience
+## Multithreaded client and server
 
 ----
+**Context**\
+Multiple clients making requests to a single server program.
+
 ### How to run the program
-1. Run the command `gcc -pthread clasico.c`
-2. Run `./a.out`
-3. Input the details of the zones, spectators and goal chances.
+1. Run the command `gcc -o server -pthread my_server.cpp`.
+2. Run `./server n`, where n is the number of worker threads in the thread pool.
+3. In a separate terminal, run `gcc -o client -pthread my_client.cpp`.
+4. Run `./client`.
+5. Input the total number of user requests throughout the simulation followed by the description of each user request. 
 
-**Context** - A football match is taking place at the Gachibowli Stadium. There are 2 teams involved: FC Messilona (Home Team) and Benzdrid CF (Away Team). People from all over the city are coming to the stadium to watch the match. We have created a simulation where people *enter* the stadium, *buy tickets* to a particular *zone* (stand), *watch the match* and then *exit*.
+### CLIENT PROGRAM
 
-### Variables
-
-1. `struct zone` - describes a given zone *Home/Away/Neutral*. It has a single data member - `int capacity`.
-2. `zone zone_A, zone_H, zone_N`
-3. `num_groups` - total number of groups in the simulation.
-4. `num_people` - total number of people in the simulation.
-5. `struct spectator` - describes a person who visits the stadium to watch the match during the simulation.\
-*Data members*
+1. The `struct client_req` has the following data members
 ```cpp
-int id; //index in the match_specs array
-char name[MAX];    //person's name
-int group_num;     //group id of the group to which the person belongs
-char fan_type;     // H/A/N
-int entry_time;    // time in secs after which the person enters the stadium - specific to each person.
-int patience_time; //time (in sec) for which he will wait to get a ticket in any of his eligible zones
-int patience_num_goals;
-pthread_t thread;   //thread that simulates the spectator
-int is_seated;
-// 0 - spectator is waiting for a seat
-// 1 - spectator got a seat in zone H
-// 2 - spectator got a seat in zone A
-// 3 - spectator got a seat in zone N
-// -1 - spectator is not in the stadium
-
-pthread_mutex_t spec_mutex;
-pthread_cond_t get_seat;
-pthread_cond_t opponent_goals;
-````
-1. `int X` - SPECTATING TIME - this value is fixed across all spectators.
-2. `struct goal_chance` describes a goal chance
-```c
-    int id;
-    char team_str[2]; //input
-    char team;        // H/A
-    int time_elapsed;  
-    float prob;       //probability of the goal chance actually converting into a goal
-    pthread_t thread;
-````
-8. `int total_goal_chances` - total number of goal chances for either of the teams throughout the simulation.
-
-9. `pthread_mutex_t goals_mutex` - acquired and released whenever some thread accesses/modifies `goals_home` or `goals_away`.
-10. `int goals_home` and `int goals_away` - total number of goals scored by either of the teams till any moment in the simulation. 
-
-#### Threads
-* A thread for each spectator 
-* A thread for each goal_chance
-* A thread `goal_signal`
-
-#### Locks
-*  pthread_mutex_t spec_mutex;
-*  pthread_mutex_t goals_mutex;
-
-#### Condition Variables
-* pthread_cond_t get_seat;
-* pthread_cond_t opponent_goals;
-
-#### Semaphores
-* sem_t zoneA_sem;
-* sem_t zoneH_sem;
-* sem_t zoneN_sem;
-
-### Routines
-
-1. In the main thread, we take the input, initialize the locks, CVs and the semaphores and start the simulation. Next we create separate threads for each *spectator* and each *goal chance*, only after all the spectator threads *join back* the main thread, the simulation ends.
-
-2. In the `spectator_thread` (*spectator id* is passed as an argument in pthread_create), the thread sleeps for the time in secs after which the spectator enters the stadium. First we make a check, for the Home and Away fans, if the number of goals of the opponent team is greater than equal to the number of goals required to enrage the spectator to leave the stadium. If yes, the spectator leaves the stadium, otherwise we call the `get_seat` routine to allocate a seat to the spectator based on whether he is a home fan, away fan or neutral fan. The `get_seat` routine sets the is_seated data member of the spectator structure as $0$, if no seat is allocated, $1$ if the spectator is allocated a seat in *HOME* zone, $2$ in *AWAY* zone, $3$ in *NEUTRAL* zone. If after returning from *get_seat*, is_seated $= 0$, it implies that he couldn't get a seat within his *patience time* thus he leaves the stadium. If is_seated $> 0$, `watch_match()` routine is called, and the spectator watches the match for a time X, with exceptions when he gets enraged due to the bad performance of his team, in case of home or away fans, and leaves the stadium. After the spectator returns from the `watch_match` routine, we use sem_post for the semaphore corresponding to the zone the spectator had seated in.
-
-3. 'In the `get_seat` routine, if the spectator is a **neutral fan**, we create $3$ threads, 
-```c
-pthread_t away_thread, neutral_thread, home_thread;
-pthread_create(&(neutral_thread), NULL ,zone_neutral_thread, (void *)(&(sid)));
-pthread_create(&(home_thread), NULL, zone_home_thread, (void *)(&(sid)));
-pthread_create(&(away_thread), NULL, zone_away_thread, (void *)(&(sid)));
+int id;
+int t; //the time at which the request has been made
+char command[CMAX]; //request/the command issued
+pthread_t client_thread_id; 
+pthread_mutex_t client_mutex;
+// a mutex accquired whenever we are accessing/modifying
+//data members of this stucture that can be changed by different threads simultaneously
+int client_socket_fd; // file descriptor of the socket associated with the client
 ````
 
-Each of these threads *timedwait* on the corresponding zone-semaphores as follows
+2. The command/request issued can be in one of the following formats :-
+
+● insert *key* *value* \
+● delete *key* \
+● update *key* *value* \
+● concat *key1* *key2* \
+● fetch *key*
+
+3. `m` - total number of client requests
+
+4. `client_req *req_list` - list of all the client requests received in the input.
+
+5. `pthread_mutex_t output` - lock accquired by the client thread who wishes to print on the terminal
+
+6. In the *main thread*, we take the input, initialize the locks, create m client threads and wait for each of them to complete.
+
+7. In the *client thread*, we create a socket and connect to the server using the `get_socket_fd` routine. Then the thread sleeps till the time at which the request has been made. Next, we acquire the client_mutex and try sending the command to the server using the `write` system call. If this *fails*, we `return` from the client thread. If the write call succeeds, we try to receive the server response to the request using the `read` system call. `read` is a blocking system call thus the client thread blocks until there is something to read through the *socket*. If the read call succeeds, client thread acquires the output mutex and prints the server response. `request_id : thread_id : server_response`.
+
+8. In the `get_socket_fd` routine, we create a socket using the `socket` system call, which returns the file descriptor(fd) of the new socket. We have defined the port number of the server as `8001`. We set the `struct sockaddr_in server_obj`. Next we connect the socket to the server using the `connect` system call.
+
+
+### SERVER PROGRAM
+
+#### Variables
+
+1. `struct worker` has two data members, 
+```cpp
+int id; //worker id
+pthread_t worker_thread_id;
+````
+2. `n` - command line argument - number of worker threads in the *thread pool* - these ‘n’ threads are the ones which are supposed to deal with the client requests. Thus, at max ‘n’ client requests will be handled by the server at any given instant.
+
+3. `worker *worker_list` - list of n workers.
+
+4.`pthread_cond_t service_client` - condition variable on which the worker threads wait when the client request queue is empty. Whenever the server accepts a new connection request from a client, the main thread signals the worker threads waiting on the service_client condition variable.
+
+5.`pthread_mutex_t queue_lock` - a mutex acquired whenever we push or pop a client request from the client request queue.
+
+6.`queue<int> client_q` - client request queue - whenever the server accepts a new connection request from a client, it pushes the client socket fd in the queue and whenever a worker thread starts, if the queue is not empty it pops a client request and process it.
+
+7.`struct dict_entry` - structure for a single entry in the global dictionary - it has the following data members
+```cpp
+int key;
+char value[MAX];
+// a mutex acquired whenever the entry is accessed/modified
+pthread_mutex_t dict_entry_mutex;
+int is_present;
+// 1 if the entry was inserted in this session
+// 0 if the entry was never inserted or deleted
+````
+
+8. `dict_entry dict[MAX]` - common dictionary
+
+#### Routines
+
+9. In the *main thread*, we initialize the locks, condition variables, create *n* worker threads. Next we create the server socket using the `create_server_socket` routine.
+
+10. In `create_server_socket`, the server required `2` sockets, one to listen to the clients' connection requests (`wel_socket_fd`) and one to communicate with the connected clients(`client_socket_fd`). Since `listen` and `read` are blocking system calls, we need separate worker threads. We create the first socket using the `socket` system call, `wel_socket_fd = socket(AF_INET, SOCK_STREAM, 0)`. Next, we initialize the structures `struct sockaddr_in serv_addr_obj, client_addr_obj` using the `bzero` system call and set the port number as `8001` and other data members. Next we `bind` the new socket `wel_socket_fd` with the `serv_addr_obj`. Now the server start listening to the clients' connection requests using the `listen` system calls, `listen(wel_socket_fd, MAX_CLIENTS)`. For every new connection request, we use the `accept` system call which returns the `socket fd` of the connected client, `client_socket_fd = accept(wel_socket_fd, (struct sockaddr *)&client_addr_obj, &clilen)`. We push the socket fd in the `client_q` and signal the `service_client` CV, in case any worker thread is waiting on the same. (Since queue is global data structure accessed and modified by multiple threads we use `queue_lock`).
+
+11. In the `worker_thread`, we acquire the `queue_lock` and check if the queue is empty, if yes, the thread waits on the `service_client` CV, else it pops a socket fd from the queue and calls `handle_connection(client_sock_fd)`.
+
+12. In `handle_connection` routine, the server reads the command sent by the client using the `read` system call and calls `handle_command(command, client_socket_fd)` in case of a successful read.
+
+13. In `handle_command` routine, we parse the command and store the command type (*insert/delete/concat/update/fetch*) and related arguments in a 2D character array `arguments`. Based on the command type the worker thread, reads/writes the contents of the dictionary and send corresponding message to the client. Here is the block for `update` command :-
 
 ```cpp
-    int sid = *(int *)arg;
-    struct timespec ts;
-    if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
-    {
-        perror("Error : ");
-        return NULL;
-    }
-    ts.tv_sec = ts.tv_sec + match_specs[sid]->patience_time;
-    int s;
-    while ((s = sem_timedwait(&zoneN_sem, &ts)) == -1 && errno == EINTR)
-        continue;
-
-    if (s == -1)
-    {
-        if (errno == ETIMEDOUT)
-        {
-            //printf("sem_timedwait() timed out\n");
-            return NULL;
-        }
-        else
-        {
-
-            //perror("sem_timedwait");
-            return NULL;
-        }
-    }
-    else
-    {
-        //printf("sem_timedwait() succeeded\n");
-        pthread_mutex_lock(&match_specs[sid]->spec_mutex);
-        if (match_specs[sid]->is_seated == 0)
-        {
-            match_specs[sid]->is_seated = 3;
-            pthread_cond_signal(&match_specs[sid]->get_seat);
-        }
-        else
-            sem_post(&zoneN_sem);
-        pthread_mutex_unlock(&match_specs[sid]->spec_mutex);
-    }
-````
-
-**sem_timedwait** waits on the semaphore for the *patience time* of the spectator, returns $-1$ and $errno = ETIMEDOUT$ in case no seat was available in that zone within the patience time, if a seat was made available within that time, sem_timedwait returns 0, in this case we check if the spectator hasn't been allocated yet, as 3 threads are simultaneously running with the same objective, since multiple threads can access and modify this data member of the spectator structure, we use the `spec_mutex`. If the spectator wasn't allocated any seat yet, we modify `is_seated`, signal the spectator_thread (currently waiting in `get_seat` routine). In case sem_timedwait returns 0 and spectator was already allocated a seat we call sem_post as the spectator did not take that seat. In the get_seat we use `pthread_cond_timedwait` again as in case none of the threads signal it, it is not stuck.
-
-```c
- pthread_t away_thread, neutral_thread, home_thread;
-struct timespec ts;
-if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
+if (num_args != 3)
 {
-    perror("Error : ");
-    return -1;
+    cout << "Invalid Command" << endl;
+    return;
 }
-ts.tv_sec = ts.tv_sec + match_specs[sid]->patience_time;
 
-pthread_create(&(neutral_thread), NULL, zone_neutral_thread, (void *)(&(sid)));
-pthread_create(&(home_thread), NULL, zone_home_thread, (void *)(&(sid)));
-pthread_create(&(away_thread), NULL, zone_away_thread, (void *)(&(sid)));
-pthread_mutex_lock(&match_specs[sid]->spec_mutex);
-pthread_cond_timedwait(&match_specs[sid]->get_seat, &match_specs[sid]->spec_mutex, &ts);
-pthread_mutex_unlock(&match_specs[sid]->spec_mutex);
-   
-````
+int key = atoi(arguments[1]);
+char value[MAX];
+strcpy(value, arguments[2]);
 
-As we did for a neutral fan, similarly we create two threads for a *home* fan (pthread_t neutral_thread, home_thread) and a single thread for *away* fan.
-
-4. In the `watch_match` routine, in case the spectator is a `neutral fan`, we call sleep(X), $X$ is the spectating time - common across all spectators, in case of home/away fans,
-
-```c
-struct timespec ts;
-if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
+pthread_mutex_lock(&dict[key].dict_entry_mutex);
+if (dict[key].is_present == 0)
 {
-    perror("Error : ");
-    return -1;
+    cout << "Updation successful" << endl;
+    send_string_on_socket(client_socket_fd, "Updation successful");
 }
-ts.tv_sec = ts.tv_sec + X;
-
-int rc;
-pthread_mutex_lock(&match_specs[sid]->spec_mutex);
-rc = pthread_cond_timedwait(&match_specs[sid]->opponent_goals, &match_specs[sid]->spec_mutex, &ts);
-pthread_mutex_unlock(&match_specs[sid]->spec_mutex);
-
-if (goals_away >= match_specs[sid]->patience_num_goals)
-    printf(BLUE "%s is leaving due to the bad performance of his team\n", match_specs[sid]->name);
 else
-    printf(BLUE "%s watched the match for %d seconds and is leaving\n", match_specs[sid]->name, X);
+{
+    dict[key].key = key;
+    strcpy(dict[key].value, value);
+    cout << "No such key exists" << endl;
+    send_string_on_socket(client_socket_fd, "No such key exists");
+}
+pthread_mutex_unlock(&dict[key].dict_entry_mutex);
 ````
+Since dict is a global data structure read and written by all worker threads, we acquire the `dict_entry_mutex` before accessing the `dict_entry`.
 
-We use `cond_timedwait` on the CV - `opponent goals`, for X time.
+14. `send_string_on socket` uses the `write` system call to send the message to the client
+```cpp
+int bytes_sent = write(fd, s.c_str(), s.length());
+if (bytes_sent < 0)
+{
+    cerr << "Failed to SEND DATA via socket.\n";
+}
 
-5. We create a thread other than the spectator and goal_chances threads which run continuously through the simulation, 
-
-```c
- while (simulation == 1)
-    {
-        for (int i = 0; i < num_people; i++)
-        {
-            char fan = match_specs[i]->fan_type;
-
-            if (match_specs[i]->is_seated > 0) // possible values for is_seated = 0, 1, 2, 3, -1
-            {
-                switch (fan)
-                {
-                case 'H':
-                    pthread_mutex_lock(&goals_mutex);
-                    if (goals_away >= match_specs[i]->patience_num_goals)
-                        pthread_cond_signal(&match_specs[i]->opponent_goals);
-                    pthread_mutex_unlock(&goals_mutex);
-                    break;
-                case 'A':
-                    pthread_mutex_lock(&goals_mutex);
-                    if (goals_home >= match_specs[i]->patience_num_goals)
-                        pthread_cond_signal(&match_specs[i]->opponent_goals);
-                    pthread_mutex_unlock(&goals_mutex);
-                    break;
-                case 'N':
-                    break;
-                default:
-                    break;
-                }
-            }
-        }
-    }
+return bytes_sent;
 ````
-
-it traverse through the spec_list and checks if for any spectator who is a home/away fan and currently watching the match (is_seated$> 0$), and signals `opponent_goals` in case opponent_goals >= patience goals for that spectator.
-
-6. In the `goal_chance_thread`, sleep for the time in secs until the goal chance is created. Then according to the random result as of whether the chance was converted into a goal or not, we print the corresponding statements and update `goals_away` and `goals_home`. Since these variables are accessed and modified by multiple threads, we use `goal_mutex`.
-
 ----
